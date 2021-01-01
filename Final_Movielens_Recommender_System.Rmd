@@ -1,0 +1,708 @@
+---
+title: "Movielens Recommender System"
+author: "Skyler Shapiro"
+date: "12/31/2020"
+output:
+  pdf_document: 
+    df_print: paged
+    highlight: haddock
+    keep_tex: yes
+    toc: yes
+    toc_depth: 3
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include=FALSE}
+############################################################################
+############################################################################
+###                                                                      ###
+###                              SECTION 1:                              ###
+###       CREATE EDX SET, VALIDATION SET (FINAL HOLD-OUT TEST SET)       ###
+###                                                                      ###
+############################################################################
+############################################################################
+
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(data.table)
+library(lubridate)
+library(bannerCommenter)
+
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+# if using R 3.6 or earlier:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+# if using R 4.0 or later:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+mlens <- edx
+val <- validation
+
+
+###########################################################################
+###########################################################################
+###                                                                     ###
+###                              SECTION 2:                             ###
+###                         PROCESSING THE DATA                         ###
+###                                                                     ###
+###########################################################################
+###########################################################################
+
+# Separate year from title
+mlens <- mlens %>% mutate(movie_year = as.numeric(str_sub(title,-5,-2)))
+val <- val %>% mutate(movie_year = as.numeric(str_sub(title,-5,-2)))
+
+# Convert timestamp column to date format
+mlens <- mutate(mlens, date = as_datetime(timestamp), rating_year = year(date))
+val <- mutate(val, date = as_datetime(timestamp), rating_year = year(date))
+
+# Create Age by subtracting movie_year from rating_year
+mlens <- mutate(mlens, age = rating_year - movie_year)
+val <- mutate(val, age = rating_year - movie_year)
+
+# Convert to factor
+#mlens$userId <- as.factor(mlens$userId)
+#mlens$movieId <- as.factor(mlens$movieId)
+
+
+#val$userId <- as.factor(val$userId)
+#val$movieId <- as.factor(val$movieId)
+#val$genres <- as.factor(val$genres)
+
+# Partition edx dataset
+test_index <- createDataPartition(y = mlens$rating, times = 1,
+                                  p = 0.2, list = FALSE)
+train_set <- mlens[-test_index,]
+test_set <- mlens[test_index,]
+test_set <- test_set %>% 
+  semi_join(train_set, by = "movieId") %>%
+  semi_join(train_set, by = "userId")
+```
+
+  
+# 1. Introduction
+
+This project aimed to create a movie recommender system using the Movielens 10M data set as part of the capstone project for the HarvardX Data Science Professional Certificate program. The Movielens 10M dataset includes 10 million ratings and 100,000 tag applications applied to 10,000 movies by 72,000 users (https://grouplens.org/datasets/movielens/). I trained a machine learning algorithm to predict movie ratings using a subset of the Movielens dataset. I tested the recommender system by predicting the movie ratings of the other subset of the dataset and compared the predicted ratings to the actual ratings.
+
+First, the dataset was partitioned into the "edx" and "validation" sets. The "edx" dataset was further partitioned for training and testing, which allowed for cross validation when constructing the model.I used Root Mean-Squared Error (RMSE) as the measure of prediction accuracy.
+
+First, I constructed linear models with movie, user, age, and genre effects using the training set and evaluated on the testing set. Then I constructed a regularized model which used penalized least-squares regression using the training set and evaluated using the testing set. Regularization constrains the total variability of the effect sizes by penalizing large estimates that come from small sample sizes. Lastly, I tested my final regularized model on the validation set (final holdout set) to assess model performance.
+
+The code can be found on github here: (https://github.com/skylershapiro/Movielens). 
+
+
+# 2. Methods, Exploration, and Analysis
+
+## 2.1 Download Data
+
+Download and format the MovieLens 10M dataset:https://grouplens.org/datasets/movielens/10m/
+
+```{r echo=TRUE, messages = FALSE, warning=FALSE}
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+# if using R 3.6 or earlier:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+# if using R 4.0 or later:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+```
+
+
+
+Here is a sample of the Movielens 10M dataset.
+
+```{r echo=FALSE}
+library(knitr)
+kable(edx[1:6,], caption = "First 6 Rows of edx Dataset")
+```
+
+### 2.2 Load libraries
+Load in required libraries.
+```{r echo=TRUE}
+library(tidyverse)
+library(caret)
+library(data.table)
+library(lubridate)
+library(bannerCommenter)
+```
+
+## 2.3 Generate and Processes the Data
+
+### 2.3.1 Generate Datasets
+Partition the Movielens 10M dataset into "edx" (90%) for model construction and "validation" (10%) for evaluation. Save datasets as "mlens" and "val".
+```{r echo=TRUE, warning=FALSE, message=FALSE}
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+# Save Data
+mlens <- edx
+val <- validation
+
+```
+
+### 2.3.2 Process and Clean Datasets
+
+Separate the year of release from "title", extract the year from "timestamp", and define column "age" as difference between the year of movie release and year of rating.
+
+```{r echo=FALSE}
+kable(mlens[1:6,], caption = "First 6 Rows of mlens Dataset")
+```
+
+```{r echo=TRUE}
+# Separate year from title
+mlens <- mlens %>% mutate(movie_year = as.numeric(str_sub(title,-5,-2)))
+val <- val %>% mutate(movie_year = as.numeric(str_sub(title,-5,-2)))
+
+# Convert timestamp column to date format
+mlens <- mutate(mlens, date = as_datetime(timestamp), rating_year = year(date))
+val <- mutate(val, date = as_datetime(timestamp), rating_year = year(date))
+
+# Create Age by subtracting movie_year from rating_year
+mlens <- mutate(mlens, age = rating_year - movie_year)
+val <- mutate(val, age = rating_year - movie_year)
+```
+
+The data should now look like this.
+```{r echo=FALSE}
+knitr::kable(mlens[1:6, c(5,6,7,9,10)], caption = "Processed Columns in mlens Dataset")
+```
+
+### 2.3.3 Create training and testing datasets
+
+Further partition "mlens" for training (train_set, 80%) and testing (test_set, 20%).
+
+```{r}
+# Partition mlens dataset
+test_index <- createDataPartition(y = mlens$rating, times = 1,
+                                  p = 0.2, list = FALSE)
+train_set <- mlens[-test_index,]
+test_set <- mlens[test_index,]
+test_set <- test_set %>% 
+  semi_join(train_set, by = "movieId") %>%
+  semi_join(train_set, by = "userId")
+```
+
+## 2.4 Data Exploration
+
+First, let us check the dimensions of the mlens dataset.
+```{r echo=FALSE}
+# Total number of ratings and variables in mlens
+mlens %>% summarize(ratings = nrow(mlens), 
+                    variables = ncol(mlens)) %>% knitr::kable(caption = "Number of Ratings and Variables")
+```
+
+The dataset contains the following variables
+```{r echo=FALSE}
+# Variables 
+colnames(mlens)
+
+```
+
+Finally, we will look at the total number of users and movies.
+```{r echo=FALSE}
+# Number of unique users and movies
+mlens %>% summarize (n_users = n_distinct(mlens$userId), 
+                     n_movies = n_distinct(mlens$movieId)) %>% kable(caption = "Number of Unique Users and Movies")
+```
+
+### 2.4.1 Inspect Ratings
+
+#### Ratings Summary
+
+Review ratings and check for out-of-range values (ratings should be between 0.5 and 5.0 according to Movielens data documentation). As we can see, the ratings fall between 0.5 and 5.0 as expected. Additionally, we can see that 75% of the ratings fall between 3.0 and 5.0 with an overall mean rating of 3.512.
+
+```{r echo=FALSE}
+summary(mlens$rating) 
+```
+
+#### Visualizing the Data
+First let us look at the distribution of the number of ratings given per user. We can see from the summary that the median number of ratings per user is 62 and the maximum number of ratings per user is 6616. This indicates the distribution is strongly skewed right (as seen in the figure below).
+
+```{r echo=FALSE}
+usercounts <- mlens %>% count(userId)
+summary(usercounts$n)
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+library(ggplot2)
+#Ratings per user
+mlens %>%
+  count(userId) %>%
+  ggplot(aes(n)) +
+  geom_histogram(color = "black") +
+  scale_x_log10() +
+  xlab("Number of Ratings Given") + 
+  ylab("Number of Users") +
+  ggtitle("Number of Ratings Given by Users")
+```
+
+We can look at the number ratings per movie. From the summary below, we can see that some movies are rated much more often than others.
+```{r include=FALSE}
+# Number of ratings per movie
+n_movie_ratings <- mlens %>% group_by(movieId, title) %>%
+  summarize(count = n()) %>%
+  arrange(desc(count))
+```
+
+
+```{r echo=FALSE}
+summary(n_movie_ratings$count)
+```
+
+Here we can see the most and least often rated movies
+```{r echo=FALSE,message=FALSE}
+# Most rated movies
+kable(n_movie_ratings[1:5,], caption = "Most Rated Movies")
+```
+
+```{r echo=FALSE,message=FALSE}
+
+# Least rated Movies
+num <- nrow(n_movie_ratings) - 5
+fin <- nrow(n_movie_ratings)
+kable(n_movie_ratings[num:fin,], caption = "Least Rated Movies")
+```
+
+
+Lastly we can inspect the number of ratings per genre.
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+# Ratings per genre
+genre_counts <- mlens %>% separate_rows(genres, sep = "\\|") %>%
+       group_by(genres) %>%
+       summarize(count = n()) %>%
+       arrange(desc(count)) 
+genre_counts %>% knitr::kable(caption = "Number of Ratings per Genre")
+```
+
+
+## 2.5 Modeling Approach
+
+### 2.5.1 Defining the Evaluation Method
+
+First, we will define how our model will be evaluated using Root Mean-Squared Error (RMSE) of the true compared with predicted ratings. Our goal is to minimize the RMSE of our final model.
+```{r}
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+```
+
+### 2.5.2 Model 1: Naive Model
+
+First, we create a naive model to establish a baseline for comparison. Our naive model predicts the mean value of the distribution of ratings for every movie.
+```{r}
+# Calculate Mean Rating
+mu_hat <- mean(train_set$rating)
+mu_hat
+
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+# Build Model and Calculate RMSE
+naive_rmse <- RMSE(test_set$rating, mu_hat)
+predictions <- rep(mu_hat, nrow(test_set))
+```
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+rmse_results <- data_frame(Method = "1: Naive Model", RMSE = naive_rmse)
+```
+
+
+### 2.5.3 Model 2: Movie Effect Model
+
+The distribution ratings can vary by movie. Now in addition to the overall mean, we will take into account movie effect. 
+
+```{r echo=TRUE, message=FALSE}
+# Define Mu (3.512)
+mu <- mean(train_set$rating) 
+
+# Build Model
+movie_avgs <- train_set %>% 
+  group_by(movieId) %>% 
+  summarize(b_i = mean(rating - mu))
+
+# Predict Ratings
+predicted_ratings <- mu + test_set %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  .$b_i
+```
+```{r echo=FALSE}
+model_1_rmse <- RMSE(predicted_ratings, test_set$rating)
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(Method="2: Movie Effect Model",
+                                     RMSE = model_1_rmse ))
+```
+
+
+#### Exploring Movie Effect
+
+First let us look at a histogram of movie effects. We can see the plot is slightly skewed left.
+
+```{r echo=FALSE}
+# Plot of Movie Effects
+movie_avgs %>% qplot(b_i, geom ="histogram", bins = 10, data = ., color = I("black"))
+
+```
+```{r echo=FALSE}
+movie_titles <- mlens %>% 
+  select(movieId, title, ) %>%
+  distinct() 
+
+```
+
+Now we can look at the best and worst rated movies according to our movie effects model. From the tables we can see that most of the movies are obscure and rated very few times. 
+
+```{r echo=FALSE,warning=FALSE,message=FALSE}
+# Best 10 movies according to Movie Effects model
+train_set %>% dplyr::count(movieId) %>% 
+  left_join(movie_avgs) %>%
+  left_join(movie_titles, by="movieId") %>%
+  arrange(desc(b_i)) %>% 
+  select(title, b_i, n) %>% 
+  slice(1:10) %>% 
+  knitr::kable(caption = "Best Rated Movies according to Movie Effect Model")
+```
+
+```{r echo=FALSE,warning=FALSE,message=FALSE}
+# Worst 10 movies from Movie Effects model 
+train_set %>% dplyr::count(movieId) %>% 
+  left_join(movie_avgs) %>%
+  left_join(movie_titles, by="movieId") %>%
+  arrange(b_i) %>% 
+  select(title, b_i, n) %>% 
+  slice(1:10) %>% 
+  knitr::kable(caption = "Worst Rated Movies according to Movie Effect Model")
+```
+
+
+### 2.5.4 Model 3: Movie and User Effects Model
+
+Next we will incorporate user effect into our existing movie effect model.
+
+```{r echo=TRUE, message=FALSE}
+# Calculate mu
+mu <- mean(train_set$rating) 
+
+# Build model
+user_avgs <- train_set %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating - mu - b_i))
+
+# Predict ratings
+predicted_ratings <- test_set %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  mutate(pred = mu + b_i + b_u) %>%
+  .$pred
+```
+```{r echo=FALSE}
+model_2_rmse <- RMSE(predicted_ratings, test_set$rating)
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(Method="3: Movie + User Effect Model",
+                                     RMSE = model_2_rmse ))
+```
+
+We can see the distribution of user effect modeled in the histogram below.
+
+```{r echo=FALSE, message=FALSE}
+# Visualizing User Effects
+train_set %>% 
+  group_by(userId) %>% 
+  summarize(b_u = mean(rating - mu)) %>% 
+  filter(n()>=100) %>%
+  ggplot(aes(b_u)) + 
+  geom_histogram(bins = 30, color = "black") +
+  ggtitle("User Effect")
+```
+
+
+### 2.5.5 Model 4: Movie, User and Age Effects Model
+
+Next we will incorporate age effects into our model. Age is defined as the difference between the year of the movie release and the year of the rating given.
+
+```{r echo=TRUE, message=FALSE}
+# Calculate mu
+mu <- mean(train_set$rating) 
+
+# Build model
+age_avgs <- train_set %>%
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  group_by(age) %>%
+  summarize(b_a = mean(rating - mu - b_i - b_u))
+
+#Predict Ratings
+predicted_ratings <- test_set %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  left_join(age_avgs, by='age') %>%
+  mutate(pred = mu + b_i + b_u + b_a) %>%
+  .$pred
+
+```
+```{r echo=FALSE}
+model_3_rmse <- RMSE(predicted_ratings, test_set$rating)
+rmse_results <- bind_rows(rmse_results,
+                          tibble(Method="4: Movie + User + Age Effect Model",
+                                 RMSE = model_3_rmse ))
+```
+
+
+### 2.5.6 Model 5: Movie, User, Age, and Genre Effects Model
+
+Finally, we will incorporate genre effect into our existing movie, user, and age effects model.
+```{r echo=TRUE, message=FALSE}
+
+# Calculate mu
+mu <- mean(train_set$rating) 
+
+# Build model
+genre_avgs <- train_set %>% 
+  left_join(movie_avgs,by="movieId") %>% 
+  left_join(user_avgs,by="userId") %>%
+  left_join(age_avgs,by='age') %>%
+  group_by(genres) %>%	  
+  summarize(b_g = mean(rating - mu - b_i - b_u - b_a))
+
+# Predict ratings
+predicted_ratings <- test_set %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  left_join(age_avgs, by='age') %>%
+  left_join(genre_avgs, by='genres') %>%
+  mutate(pred = mu + b_i + b_u + b_a + b_g) %>%
+  .$pred
+```
+```{r echo=FALSE}
+model_4_rmse <- RMSE(predicted_ratings, test_set$rating)
+rmse_results <- bind_rows(rmse_results,
+                          tibble(Method="5: Movie + User + Age + Genre Effect Model",
+                                 RMSE = model_4_rmse ))
+```
+
+
+## 2.6 Regularizing Model using Penalized Least-Squares Regression
+
+Now, we regularized our movie, user, age, and genre effects model using penalized least-squares regression. First we fit models with a range of tuning parameter lambdas and calculate the RMSE.
+
+```{r echo=TRUE, message=FALSE,warning=FALSE}
+# Choose range of tuning parameter lambda to optimize model
+lambdas <- seq(0, 10, 0.25)
+```
+```{r echo=TRUE,message=FALSE,warning=FALSE}
+# rmses stores RMSE from each model
+rmses <- sapply(lambdas, function(l){
+  
+  # Calculate mu
+  mu <- mean(train_set$rating)
+  
+  # Regularize movie effect
+  b_i <- train_set %>% 
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu)/(n()+l))
+  
+  # Regularize user effect
+  b_u <- train_set %>% 
+    left_join(b_i, by="movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+  
+  # Regularize age effect
+  b_a <- train_set %>% 
+    left_join(b_i, by="movieId") %>%
+    left_join(b_u, by='userId') %>%
+    group_by(age) %>%
+    summarize(b_a = sum(rating - b_u - b_i - mu)/(n()+l))
+  
+  # Regularize genre effect
+    b_g <- train_set %>% 
+      left_join(b_i, by="movieId") %>%
+      left_join(b_u, by='userId') %>%
+      left_join(b_a, by='age') %>%
+    group_by(genres) %>%
+      summarize(b_g = sum(rating - b_a - b_u - b_i - mu)/(n()+l))
+  
+    # Predict ratings
+  predicted_ratings <- 
+    test_set %>% 
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    left_join(b_a, by='age') %>%
+    left_join(b_g, by='genres') %>%
+    mutate(pred = mu + b_i + b_u + b_a + b_g) %>%
+    pull(pred)
+  
+  # Calculate RMSE
+  return(RMSE(predicted_ratings, test_set$rating))
+})
+```
+```{r echo=FALSE}
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(Method="6: Regularized Movie + User + Age + Genre Effect Model",  
+                                     RMSE = min(rmses)))
+```
+
+Then we plotted our RMSE values versus lambda. We can see from the graph below that lambda is at a minimum just below 5.0.
+
+```{r echo=FALSE, message=FALSE}
+# Plot of RMSE versus lambda values
+qplot(lambdas, rmses)  
+```
+
+Next we calculated the lambda which minimized RMSE.
+
+```{r echo=TRUE}
+# Calculate lambda which minimizes RMSE
+lambda <- lambdas[which.min(rmses)]
+lambda
+```
+
+
+### 2.7 Testing Model on Validation Set
+
+Finally, we tested our regularized model with the optimized lambda on the validation set.
+
+```{r echo=TRUE,message=FALSE,warning=FALSE}
+# Calculate RMSE on model with optimized lambda
+final_rmse <- sapply(lambda, function(l){
+ # Calculate mu
+   mu <- mean(mlens$rating)
+  
+   # Regularized movie effect 
+   b_i <- mlens %>% 
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu)/(n()+l))
+  
+   # Regularized user effect 
+   b_u <- mlens %>% 
+    left_join(b_i, by="movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+    
+   # Regularized age effect 
+   b_a <- mlens %>% 
+    left_join(b_i, by="movieId") %>%
+    left_join(b_u, by='userId') %>%
+    group_by(age) %>%
+    summarize(b_a = sum(rating - b_u - b_i - mu)/(n()+l))
+ 
+    # Regularized genre effect 
+   b_g <- mlens %>% 
+    left_join(b_i, by="movieId") %>%
+    left_join(b_u, by='userId') %>%
+    left_join(b_a, by='age') %>%
+    group_by(genres) %>%
+    summarize(b_g = sum(rating - b_a - b_u - b_i - mu)/(n()+l))
+
+   # Predict ratings for validation set
+  predicted_ratings <- val %>% 
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    left_join(b_a, by='age') %>%
+    left_join(b_g, by='genres') %>%
+    mutate(pred = mu + b_i + b_u + b_a + b_g) %>%
+    pull(pred)
+  
+  return(RMSE(val$rating, predicted_ratings))
+  
+})
+
+```
+```{r echo=FALSE}
+rmse_results <- bind_rows(rmse_results,
+                          tibble(Method="VALIDATION SET: Regularized Movie + User + Age + Genre Effect Model",
+                                 RMSE = final_rmse ))
+```
+
+
+# 3. Results
+
+The table below shows the RMSE of each model. We can see that incorporating the effects of movie, user, age, and genre each decreased the RMSE of the model, indicating improved accuracy. Implementing regularization on the model further improved accuracy. When we applied our final regularized model to the validation set the RMSE was 0.8639820.
+
+```{r echo=FALSE}
+rmse_results %>% knitr::kable(caption = "RMSE Results")
+```
+
+
+# 4. Conclusion
+
+In this project, we built a movie recommender system using the Movielens 10M dataset. Our final model included movie, user, age, and genre effects as well as penalized least-squares regression. The model performed well on the validation set.
+
+One limitation was the way genre was modeled. Because each movie's genre was comprised of multiple genre categories, each unique combination of genre categories was counted as its own genre. In future work, we could model each genre category independently to try to extract more information from this variable. 
+
+In future work, implementing matrix factorization and Principal Components Analysis could potentially reduce the RMSE even further and therefore improve the accuracy of predictions.
+
